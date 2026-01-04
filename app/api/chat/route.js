@@ -34,9 +34,31 @@ IMPORTANT:
 - Keep challenges simple (one blank usually).
 `;
 
+import { ratelimit } from "../../../lib/redis";
+
 export async function POST(req) {
     try {
         const { message, history = [] } = await req.json();
+
+        // Rate Limiting Logic
+        if (ratelimit) {
+            const ip = req.headers.get("x-forwarded-for") || "127.0.0.1";
+            const { success, limit, reset, remaining } = await ratelimit.limit(ip);
+
+            if (!success) {
+                return Response.json({
+                    type: 'text',
+                    content: "Whoa! You're typing too fast. Please wait a few seconds."
+                }, {
+                    status: 429,
+                    headers: {
+                        "X-RateLimit-Limit": limit.toString(),
+                        "X-RateLimit-Remaining": remaining.toString(),
+                        "X-RateLimit-Reset": reset.toString()
+                    }
+                });
+            }
+        }
 
         const apiKey = process.env.GEMINI_API_KEY;
         if (!apiKey) {

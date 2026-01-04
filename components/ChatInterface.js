@@ -4,17 +4,13 @@ import { useState, useRef, useEffect } from 'react';
 import MessageBubble from './MessageBubble';
 // Lucide icons for Send button
 import { Send } from 'lucide-react';
+import { SignInButton, SignedIn, SignedOut, UserButton, useUser } from '@clerk/nextjs'
+import { supabase } from '../lib/supabase';
 
 export default function ChatInterface() {
-    // Initial State consistent with App.tsx design
-    const [messages, setMessages] = useState([
-        {
-            id: '1',
-            role: 'ai',
-            content: "Ready to map your existing knowledge to a new syntax? Let's dive into idiomatic patterns and advanced concepts.",
-            type: 'text'
-        }
-    ]);
+    const { user, isLoaded } = useUser();
+    // Use user.id as key to force re-render when user changes (login/logout)
+    const [messages, setMessages] = useState([]);
     const [inputValue, setInputValue] = useState('');
     const [isTyping, setIsTyping] = useState(false);
     const messagesEndRef = useRef(null);
@@ -22,6 +18,50 @@ export default function ChatInterface() {
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     };
+
+    // Load initial messages from Supabase
+    useEffect(() => {
+        if (!isLoaded) {
+            return; // Wait for Clerk to load
+        }
+
+        if (!user) {
+            // Default welcome message if not logged in (though middleware usually protects this now)
+            setMessages([{
+                id: 'welcome',
+                role: 'ai',
+                content: "Ready to map your existing knowledge to a new syntax? Let's dive into idiomatic patterns and advanced concepts.",
+                type: 'text'
+            }]);
+            return;
+        }
+
+        const fetchMessages = async () => {
+            const { data, error } = await supabase
+                .from('messages')
+                .select('*')
+                .eq('user_id', user.id)
+                .order('created_at', { ascending: true });
+
+            if (error) {
+                console.error('Error fetching messages:', error);
+                return;
+            }
+
+            if (data && data.length > 0) {
+                setMessages(data);
+            } else {
+                setMessages([{
+                    id: 'welcome',
+                    role: 'ai',
+                    content: "Ready to map your existing knowledge to a new syntax? Let's dive into idiomatic patterns and advanced concepts.",
+                    type: 'text'
+                }]);
+            }
+        };
+
+        fetchMessages();
+    }, [user, isLoaded]);
 
     useEffect(() => {
         scrollToBottom();
@@ -31,23 +71,33 @@ export default function ChatInterface() {
         e.preventDefault();
         if (!inputValue.trim()) return;
 
-        const userMessage = {
-            id: Date.now(),
-            role: 'user',
-            content: inputValue,
-            type: 'text'
-        };
-
-        setMessages(prev => [...prev, userMessage]);
+        const currentInput = inputValue;
         setInputValue('');
         setIsTyping(true);
 
-        try {
-            // Gemini history logic (filtering logic remains same)
-            const firstUserIndex = messages.findIndex(m => m.role === 'user');
-            const validHistory = firstUserIndex !== -1 ? messages.slice(firstUserIndex) : [];
+        const tempId = Date.now();
 
-            const history = validHistory.map(m => ({
+        // Optimistic UI update
+        const userMsgOptimistic = {
+            id: tempId,
+            role: 'user',
+            content: currentInput,
+            type: 'text'
+        };
+        setMessages(prev => [...prev, userMsgOptimistic]);
+
+        try {
+            // Save User Message to DB
+            if (user) {
+                await supabase.from('messages').insert({
+                    user_id: user.id,
+                    role: 'user',
+                    content: currentInput
+                });
+            }
+
+            // Prepare history for API
+            const history = messages.map(m => ({
                 role: m.role,
                 content: m.content
             }));
@@ -56,27 +106,36 @@ export default function ChatInterface() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    message: userMessage.content,
+                    message: currentInput,
                     history: history
                 }),
             });
 
             const data = await res.json();
 
-            // Handling response
             if (!res.ok) {
                 throw new Error(data.error || 'Failed to fetch');
+            }
+
+            const aiContent = data.content;
+
+            // Save AI Message to DB
+            if (user) {
+                await supabase.from('messages').insert({
+                    user_id: user.id,
+                    role: 'ai',
+                    content: aiContent
+                });
             }
 
             const aiMessage = {
                 id: Date.now() + 1,
                 role: 'ai',
-                content: data.content,
+                content: aiContent,
                 type: data.type || 'text',
                 codeData: data.codeData
             };
 
-            // Server now handles parsing, so we use the structured data directly
             setMessages(prev => [...prev, aiMessage]);
         } catch (error) {
             console.error("Chat Error:", error);
@@ -98,7 +157,19 @@ export default function ChatInterface() {
             <div className="bg-[rgba(255,173,77,0.27)] rounded-[50px] w-full max-w-6xl h-[85vh] flex flex-col shadow-2xl overflow-hidden backdrop-blur-sm">
 
                 {/* Header */}
-                <div className="p-10 border-b border-black/10 text-center">
+                <div className="p-10 border-b border-black/10 text-center relative">
+                    <div className="absolute top-6 right-8">
+                        <SignedOut>
+                            <SignInButton mode="modal">
+                                <button className="bg-black/10 hover:bg-black/20 text-black px-4 py-2 rounded-xl transition-all font-['Unna',sans-serif]">
+                                    Login
+                                </button>
+                            </SignInButton>
+                        </SignedOut>
+                        <SignedIn>
+                            <UserButton />
+                        </SignedIn>
+                    </div>
                     <h1 className="font-['Fresca',sans-serif] text-black text-6xl tracking-[-2px]">
                         Polyglot AI
                     </h1>
